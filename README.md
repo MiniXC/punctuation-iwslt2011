@@ -1,6 +1,5 @@
 # punctuation-iwslt2011
-Huggingface datasets script for pre-processing punctuation annotation using IWSLT11 dataset. For ASR transcripts, punctuation marks are inferred using Levenshtein alignment as described by [Ueffing et al. (2013)](#1).
-
+Huggingface datasets script for loading pre-processing punctuation annotation using IWSLT11 dataset reference transcriptions ([IWSLT-2011](#1)).
 ### Without Pause Information
 
 ```python
@@ -17,4 +16,4 @@ ds = load_dataset('iwslt2011.py', 'ref-pauses')
 
 ## References
 <a id="1">[1]</a> 
-B.  Ueffing,  M.  Bisani,  and  P.  Vozila.  Improved  models  for  automatic  punctuation prediction for spoken and written text. In INTERSPEECH, 2013.
+International Workshop on Spoken Language Translation (IWSLT) 2011, San Francisco, CA, USA, December 8-9, 2011; ISCA Archive, http://www.isca-speech.org/archive/iwslt_11
