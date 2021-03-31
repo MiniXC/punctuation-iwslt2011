@@ -151,6 +151,7 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
                 supervised_keys=None,
                 homepage="http://iwslt2011.org/doku.php",
                 citation=_CITATION,
+                version=_VERSION,
             )
 
     def _split_generators(self, dl_manager):
