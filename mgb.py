@@ -1,4 +1,4 @@
-"""The IWSLT Challenge Dataset, adapted to punctuation as described by Ueffing et al. (2013)"""
+"""The MGB Dataset, adapted for punctuation annotation"""
 
 from __future__ import absolute_import, division, print_function
 
@@ -8,6 +8,7 @@ from typing import Union
 from xml.dom import minidom
 import re
 import itertools
+from multiprocessing import Pool
 
 import datasets
 from collections import deque
@@ -35,27 +36,19 @@ def word_tokenize(text):
 
 
 _CITATION = """\
-@inproceedings{Ueffing2013,
-    title={Improved models for automatic punctuation prediction for spoken and written text},
-    author={B. Ueffing and M. Bisani and P. Vozila},
-    booktitle={INTERSPEECH},
-    year={2013}
-}
-@article{Federico2011,
-    author = {M. Federico and L. Bentivogli and M. Paul and S. Stüker},
-    year = {2011},
-    month = {01},
-    pages = {},
-    title = {Overview of the IWSLT 2011 Evaluation Campaign},
-    journal = {Proceedings of the International Workshop on Spoken Language Translation (IWSLT), San Francisco, CA}
-}
+@INPROCEEDINGS{Bell2015, \
+author={P. {Bell} and M. J. F. {Gales} and T. {Hain} and J. {Kilgour} and P. {Lanchantin} and X. {Liu} and A. {McParland} and S. {Renals} and O. {Saz} and M. {Wester} and P. C. {Woodland}}, \
+booktitle={2015 IEEE Workshop on Automatic Speech Recognition and Understanding (ASRU)}, \
+title={The MGB challenge: Evaluating multi-genre broadcast media recognition}, \
+year={2015}, \
+volume={}, \
+number={}, \
+pages={687-693}, \
+doi={10.1109/ASRU.2015.7404863}}
 """
 
 _DESCRIPTION = """\
-Both manual transcripts and ASR outputs from the IWSLT2011 speech translation evalutation campaign are often used for the related \
-punctuation annotation task. This dataset takes care of preprocessing said transcripts and automatically inserts punctuation marks \
-given in the manual transcripts in the ASR outputs using Levenshtein aligment.
-If desired, acoustic pauses can be included in the text output as well.
+
 """
 
 _VERSION = "0.0.1"
@@ -91,8 +84,8 @@ class StreamingClassificationTask:
         return Task._STREAMING_CLASSIFICATION == other
 
 
-class IWSLT11Config(datasets.BuilderConfig):
-    """The IWSLT11 Dataset."""
+class MGBConfig(datasets.BuilderConfig):
+    """The MGB Dataset."""
 
     def __init__(
         self,
@@ -105,7 +98,7 @@ class IWSLT11Config(datasets.BuilderConfig):
         task: Union[Task, StreamingClassificationTask] = StreamingClassificationTask(),
         segmented: bool = False,
         asr_or_ref: str = "ref",
-        **kwargs
+        **kwargs,
     ):
         """BuilderConfig for IWSLT2011.
         Args:
@@ -118,22 +111,22 @@ class IWSLT11Config(datasets.BuilderConfig):
         self.task = task
         self.segmented = segmented
         self.asr_or_ref = asr_or_ref
-        super(IWSLT11Config, self).__init__(**kwargs)
+        super(MGBConfig, self).__init__(**kwargs)
 
 
-class IWSLT11(datasets.GeneratorBasedBuilder):
-    """The IWSLT11 Dataset, adapted for punctuation prediction."""
+class MGB(datasets.GeneratorBasedBuilder):
+    """The MGB Dataset, adapted for punctuation prediction."""
 
     BUILDER_CONFIGS = [
-        IWSLT11Config(name="ref", asr_or_ref="ref"),
-        IWSLT11Config(
+        MGBConfig(name="ref", asr_or_ref="ref"),
+        MGBConfig(
             name="ref-pauses",
             asr_or_ref="asr",
         ),
     ]
 
     def __init__(self, *args, **kwargs):
-        super(IWSLT11, self).__init__(*args, **kwargs)
+        super(MGB, self).__init__(*args, **kwargs)
         self.punct = [
             Punctuation.NONE,
             Punctuation.PERIOD,
@@ -167,56 +160,33 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
         """Returns SplitGenerators."""
 
         urls_to_download = {
-            "train_reference": "https://web.archive.org/web/20140203142509/http://hltshare.fbk.eu/IWSLT2011/monolingual-TED.tgz",
-            "validation_reference": "https://web.archive.org/web/20170725181407/http://hltshare.fbk.eu/IWSLT2011/devsets.tgz",
-            "test_reference": "https://web.archive.org/web/20170725181407/http://hltshare.fbk.eu/IWSLT2011/IWSLT11.MT.tst2011.tgz",
+            "train_reference": "https://data.cstr.ed.ac.uk/summa/data/english_punctuation/train.txt",
+            "validation_reference": "https://data.cstr.ed.ac.uk/summa/data/english_punctuation/dev.txt",
         }
         downloaded_files = dl_manager.download_and_extract(urls_to_download)
-        downloaded_files["train_reference"] += "/monolingual-TED/IWSLT11.TALK.train.en"
-        valid = downloaded_files["validation_reference"]
-        downloaded_files["validation_reference"] = [
-            valid + "/devsets/IWSLT11.TALK.tst2010.en-fr.en.xml",
-            valid + "/devsets/IWSLT11.TALK.dev2010.en-fr.en.xml",
-        ]
-        downloaded_files[
-            "test_reference"
-        ] += "/IWSLT11.MT.tst2011/IWSLT11.TALK.tst2011.en-fr.en.xml"
 
         if self.config.asr_or_ref == "asr":
             urls_to_download = {
-                "test_asr": "https://web.archive.org/web/20170725181407/http://hltshare.fbk.eu/IWSLT2011/IWSLT11.SLT.tst2011_2nd.tgz",
-                "validation_asr_1": "https://web.archive.org/web/20170725181407/http://hltshare.fbk.eu/IWSLT2011/IWSLT11.SLT.tst2010.1best.v1.tgz",
-                "validation_asr_2": "https://web.archive.org/web/20170725181407/http://hltshare.fbk.eu/IWSLT2011/IWSLT11.SLT.dev2010.1best.v1.tgz",
+                "train_asr": "https://data.cstr.ed.ac.uk/summa/data/english_punctuation/train.ctm",
+                "validation_asr": "https://data.cstr.ed.ac.uk/summa/data/english_punctuation/dev.ctm",
             }
             asr_files = dl_manager.download_and_extract(urls_to_download)
-            asr_files[
-                "test_asr"
-            ] += "/IWSLT11.SLT.tst2011_2nd/tst2011_2nd.ASR_E.rover4021.ctm"
-            asr_files[
-                "validation_asr_1"
-            ] += "/IWSLT11.SLT.tst2010.1best.v1/ted.tst2010.en-fr.en.ctm"
-            asr_files[
-                "validation_asr_2"
-            ] += "/IWSLT11.SLT.dev2010.1best.v1/ted.dev2010.en-fr.en.ctm"
 
             return [
                 datasets.SplitGenerator(
                     name=datasets.Split.VALIDATION,
                     gen_kwargs={
                         "filepath": downloaded_files["validation_reference"],
-                        "format": "xml",
-                        "asr_files": [
-                            asr_files["validation_asr_1"],
-                            asr_files["validation_asr_2"],
-                        ],
+                        "format": "kaldi",
+                        "asr_files": asr_files["validation_asr"],
                     },
                 ),
                 datasets.SplitGenerator(
                     name=datasets.Split.TEST,
                     gen_kwargs={
-                        "filepath": downloaded_files["test_reference"],
-                        "format": "xml",
-                        "asr_files": asr_files["test_asr"],
+                        "filepath": downloaded_files["train_reference"],
+                        "format": "kaldi",
+                        "asr_files": asr_files["train_asr"],
                     },
                 ),
             ]
@@ -227,21 +197,14 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
                     name=datasets.Split.TRAIN,
                     gen_kwargs={
                         "filepath": downloaded_files["train_reference"],
-                        "format": "plain",
+                        "format": "kaldi-plain",
                     },
                 ),
                 datasets.SplitGenerator(
                     name=datasets.Split.VALIDATION,
                     gen_kwargs={
                         "filepath": downloaded_files["validation_reference"],
-                        "format": "xml",
-                    },
-                ),
-                datasets.SplitGenerator(
-                    name=datasets.Split.TEST,
-                    gen_kwargs={
-                        "filepath": downloaded_files["test_reference"],
-                        "format": "xml",
+                        "format": "kaldi-plain",
                     },
                 ),
             ]
@@ -253,15 +216,89 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
         return self.get_label(word) != Punctuation.NONE
 
     def get_label(self, word):
-        if word.strip() == "." and Punctuation.PERIOD in self.include_punct:
+        if (word.strip() == "." or word.strip() == "<full_stop>" or word.strip() == "<dots>") and Punctuation.PERIOD in self.include_punct:
             return Punctuation.PERIOD
-        if word.strip() == "," and Punctuation.COMMA in self.include_punct:
+        if (word.strip() == "," or word.strip() == "<comma>") and Punctuation.COMMA in self.include_punct:
             return Punctuation.COMMA
-        if word.strip() == "?" and Punctuation.QUESTION in self.include_punct:
+        if (word.strip() == "?" or word.strip() == "<question_mark>") and Punctuation.QUESTION in self.include_punct:
             return Punctuation.QUESTION
-        if word.strip() == "!" and Punctuation.EXCLAMATION in self.include_punct:
+        if (word.strip() == "!" or word.strip() == "<exclamation_mark>") and Punctuation.EXCLAMATION in self.include_punct:
             return Punctuation.EXCLAMATION
         return Punctuation.NONE
+
+    def align_talk(self, talk):
+        window = self.config.task.window_size
+        min_lookahead = self.config.task.lookahead_range[0]
+        max_lookahead = self.config.task.lookahead_range[1]
+        results = []
+        context_words = []
+        context_labels = []
+        talks = self.talks
+        asr_talks = self.asr_talks
+        for text in talks[talk]:
+            for word in word_tokenize(text):
+                word = word.lower()
+                if self.is_word(word):
+                    if not self.is_punct(word):
+                        context_words.append(word)
+                        context_labels.append(Punctuation.NONE)
+                    else:
+                        context_labels[-1] = self.get_label(word)
+        alignment = pairwise2.align.globalxx(
+            context_words, asr_talks[talk]["words"], gap_char=["<gap>"]
+        )[0]
+        lbl_i = 0
+        new_words = []
+        new_labels = []
+        for i, word in enumerate(alignment.seqA):
+            if (
+                alignment.seqB[i] == "<pause>"
+                and i > 0
+                and alignment.seqB[i - 1] != "<gap>"
+            ):
+                new_words.append("<pause>")
+                new_labels.append(Punctuation.NONE)
+                lbl_i -= 1
+            if word != "<gap>":
+                new_words.append(word)
+                new_labels.append(context_labels[i + lbl_i])
+            else:
+                lbl_i -= 1
+        new_context_words = []
+        new_context_labels = []
+        i = 0
+        for word, label in zip(new_words, new_labels):
+            new_context_words.append(word)
+            new_context_labels.append(label)
+            new_context_words = new_context_words[-(window + max_lookahead) :]
+            new_context_labels = new_context_labels[-(window + max_lookahead) :]
+            la = np.random.randint(min_lookahead, max_lookahead + 1)
+            if len(new_context_words) >= window:
+                right_context = new_context_words[-max_lookahead:][:la]
+                num_right_pauses = None
+                while num_right_pauses != len(
+                    [p for p in right_context if p == "<pause>"]
+                ):
+                    num_right_pauses = len(
+                        [p for p in right_context if p == "<pause>"]
+                    )
+                    right_context = new_context_words[
+                        -(max_lookahead + num_right_pauses) :
+                    ][: (la + num_right_pauses)]
+
+                results.append((i, {
+                    "text": " ".join(
+                        new_context_words[
+                            la : -(max_lookahead + num_right_pauses)
+                        ]
+                    )
+                    + " <punct> "
+                    + " ".join(right_context),
+                    "label": new_labels[-(max_lookahead + 1)].value,
+                    "lookahead": la,
+                }))
+            i += 1
+        return results
 
     def _generate_examples(self, filepath, format, asr_files=None):
         logging.info("⏳ Generating examples from = %s", filepath)
@@ -290,6 +327,21 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
                         seg.childNodes[0].wholeText.strip()
                         for seg in doc.getElementsByTagName("seg")
                     ]
+            if format == "kaldi":
+                with open(path, "r") as f:
+                    line = f.readline()
+                    while len(line) != 0:
+                        seg_id = line.split()[0]
+                        if seg_id in talks:
+                            raise ValueError(f"seg_id {seg_id} is not unique")
+                        talks[seg_id] = " ".join(line.split()[1:])
+                        line = f.readline()
+            if format == "kaldi-plain":
+                with open(path, "r") as f:
+                    line = f.readline()
+                    while len(line) != 0:
+                        texts.append([" ".join(line.split()[1:])])
+                        line = f.readline()
 
         texts = list(itertools.chain(*texts))
 
@@ -304,7 +356,8 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
                     while len(line) != 0:
                         if len(line.split()) == 5:
                             talkid, _, start_time, duration, word = line.split()
-                            talkid = int(talkid[6:])
+                            if format != "kaldi":
+                                talkid = int(talkid[6:])
                             if talkid not in asr_talks:
                                 asr_talks[talkid] = {
                                     "words": [],
@@ -326,7 +379,7 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
         max_lookahead = self.config.task.lookahead_range[1]
         i = 0
 
-        if format == "plain":
+        if format == "plain" or format == "kaldi-plain":
             context_words = []
             context_labels = []
             for text in tqdm(texts):
@@ -351,72 +404,18 @@ class IWSLT11(datasets.GeneratorBasedBuilder):
                         }
                     i += 1
 
-        if format == "xml" and asr_talks is not None:
-            overlap_talks = [t for t in talks.keys() if t in asr_talks.keys()]
-            for talk in overlap_talks:
-                context_words = []
-                context_labels = []
-                for text in tqdm(talks[talk]):
-                    for word in word_tokenize(text):
-                        word = word.lower()
-                        if self.is_word(word):
-                            if not self.is_punct(word):
-                                context_words.append(word)
-                                context_labels.append(Punctuation.NONE)
-                            else:
-                                context_labels[-1] = self.get_label(word)
-                print("computing alignment...")
-                alignment = pairwise2.align.globalxx(
-                    context_words, asr_talks[talk]["words"], gap_char=["<gap>"]
-                )[0]
-                lbl_i = 0
-                new_words = []
-                new_labels = []
-                for i, word in enumerate(alignment.seqA):
-                    if (
-                        alignment.seqB[i] == "<pause>"
-                        and i > 0
-                        and alignment.seqB[i - 1] != "<gap>"
-                    ):
-                        new_words.append("<pause>")
-                        new_labels.append(Punctuation.NONE)
-                        lbl_i -= 1
-                    if word != "<gap>":
-                        new_words.append(word)
-                        new_labels.append(context_labels[i + lbl_i])
-                    else:
-                        lbl_i -= 1
-                new_context_words = []
-                new_context_labels = []
-                i = 0
-                for word, label in zip(new_words, new_labels):
-                    new_context_words.append(word)
-                    new_context_labels.append(label)
-                    new_context_words = new_context_words[-(window + max_lookahead) :]
-                    new_context_labels = new_context_labels[-(window + max_lookahead) :]
-                    la = np.random.randint(min_lookahead, max_lookahead + 1)
-                    if len(new_context_words) >= window:
-                        right_context = new_context_words[-max_lookahead:][:la]
-                        num_right_pauses = None
-                        while num_right_pauses != len(
-                            [p for p in right_context if p == "<pause>"]
-                        ):
-                            num_right_pauses = len(
-                                [p for p in right_context if p == "<pause>"]
-                            )
-                            right_context = new_context_words[
-                                -(max_lookahead + num_right_pauses) :
-                            ][: (la + num_right_pauses)]
+        if format == "xml" or format == "kaldi" and asr_talks is not None:
+            #overlap_talks = [t for t in talks.keys() if t in asr_talks.keys()]
+            def overlap_generator(talks, asr_talks):
+                for t in talks.keys():
+                    if t in asr_talks.keys():
+                        yield t
 
-                        yield i, {
-                            "text": " ".join(
-                                new_context_words[
-                                    la : -(max_lookahead + num_right_pauses)
-                                ]
-                            )
-                            + " <punct> "
-                            + " ".join(right_context),
-                            "label": new_labels[-(max_lookahead + 1)].value,
-                            "lookahead": la,
-                        }
-                    i += 1
+            self.talks = talks
+            self.asr_talks = asr_talks
+            pool = Pool()
+            for result in tqdm(pool.imap_unordered(self.align_talk, overlap_generator(talks, asr_talks), chunksize=128)):
+                for item in result:
+                    yield item
+            pool.close()
+            pool.join()
