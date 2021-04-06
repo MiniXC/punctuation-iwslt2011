@@ -16,10 +16,25 @@ import numpy as np
 import nltk
 from nltk.tokenize import TweetTokenizer
 from tqdm.auto import tqdm
-from Bio import pairwise2
+import paired
+from diskcache import Cache
 
 nltk.download("punkt")
 tknzr = TweetTokenizer()
+
+def align(seq_1, seq_2):
+    seqA = []
+    seqB = []
+    for i, j in paired.align(seq_1, seq_2):
+        if i is not None:
+            seqA.append(seq_1[i])
+        else:
+            seqA.append('<gap>')
+        if j is not None:
+            seqB.append(seq_2[j])
+        else:
+            seqB.append('<gap>')
+    return seqA, seqB
 
 
 def word_tokenize(text):
@@ -61,6 +76,13 @@ class Punctuation(Enum):
     QUESTION = "<question>"
     EXCLAMATION = "<exclamation>"
 
+    
+punct_map = {
+    "<period>": '.',
+    "<comma>": ',',
+    "<question>": '?',
+    "<exclamation>": '!',
+}
 
 class Task(Enum):
     TAGGING = 0
@@ -82,6 +104,21 @@ class StreamingClassificationTask:
 
     def __eq__(self, other):
         return Task._STREAMING_CLASSIFICATION == other
+    
+class TaggingTask:
+    """Special task in which only predicts one possible\
+    punctuation token at a time, which can be useful for streaming ASR outputs.
+    """
+
+    def __init__(
+        self, lookahead_range=(0, 4), window_size=128, include_reference=False
+    ):
+        self.lookahead_range = lookahead_range
+        self.window_size = window_size
+        self.include_reference = include_reference
+
+    def __eq__(self, other):
+        return Task.TAGGING == other
 
 
 class MGBConfig(datasets.BuilderConfig):
@@ -98,6 +135,7 @@ class MGBConfig(datasets.BuilderConfig):
         task: Union[Task, StreamingClassificationTask] = StreamingClassificationTask(),
         segmented: bool = False,
         asr_or_ref: str = "ref",
+        teacher_forcing: bool = False,
         **kwargs,
     ):
         """BuilderConfig for IWSLT2011.
@@ -111,6 +149,7 @@ class MGBConfig(datasets.BuilderConfig):
         self.task = task
         self.segmented = segmented
         self.asr_or_ref = asr_or_ref
+        self.teacher_forcing = teacher_forcing
         super(MGBConfig, self).__init__(**kwargs)
 
 
@@ -120,8 +159,23 @@ class MGB(datasets.GeneratorBasedBuilder):
     BUILDER_CONFIGS = [
         MGBConfig(name="ref", asr_or_ref="ref"),
         MGBConfig(
+            name="ref-tag",
+            asr_or_ref="ref",
+            task=TaggingTask()
+        ),
+        MGBConfig(
             name="ref-pauses",
             asr_or_ref="asr",
+        ),
+        MGBConfig(
+            name="ref-pauses-tag",
+            asr_or_ref="asr",
+            task=TaggingTask()
+        ),
+        MGBConfig(
+            name="ref-pauses-tf",
+            asr_or_ref="asr",
+            teacher_forcing=True,
         ),
     ]
 
@@ -136,6 +190,13 @@ class MGB(datasets.GeneratorBasedBuilder):
         ]
         self.include_punct = self.config.include_punct
         self.exclude_punct = [p for p in self.punct if p not in self.include_punct]
+        self.cache = Cache('.mgb_cache')
+        if 'lookahead' in kwargs:
+            self.lookahead = kwargs['lookahead']
+        if 'pause_threshold' in kwargs:
+            self.pause_threshold = kwargs['pause_threshold']
+        else:
+            self.pause_threshold = 0.2
 
     def _info(self):
         if self.config.task == Task._STREAMING_CLASSIFICATION:
@@ -148,6 +209,24 @@ class MGB(datasets.GeneratorBasedBuilder):
                             names=[p.value for p in self.config.include_punct]
                         ),
                         "lookahead": datasets.Value("int32"),
+                    }
+                ),
+                supervised_keys=None,
+                homepage="http://iwslt2011.org/doku.php",
+                citation=_CITATION,
+                version=_VERSION,
+            )
+        if self.config.task == Task.TAGGING:
+            return datasets.DatasetInfo(
+                description=_DESCRIPTION,
+                features=datasets.Features(
+                    {
+                        "tokens": datasets.Sequence(datasets.Value("string")),
+                        "label": datasets.Sequence(
+                            datasets.features.ClassLabel(
+                                names=[p.value for p in self.config.include_punct]
+                            )
+                        ),
                     }
                 ),
                 supervised_keys=None,
@@ -174,19 +253,19 @@ class MGB(datasets.GeneratorBasedBuilder):
 
             return [
                 datasets.SplitGenerator(
+                   name=datasets.Split.TRAIN,
+                   gen_kwargs={
+                       "filepath": downloaded_files["train_reference"],
+                       "format": "kaldi",
+                       "asr_files": asr_files["train_asr"],
+                   },
+                ),
+                datasets.SplitGenerator(
                     name=datasets.Split.VALIDATION,
                     gen_kwargs={
                         "filepath": downloaded_files["validation_reference"],
                         "format": "kaldi",
                         "asr_files": asr_files["validation_asr"],
-                    },
-                ),
-                datasets.SplitGenerator(
-                    name=datasets.Split.TEST,
-                    gen_kwargs={
-                        "filepath": downloaded_files["train_reference"],
-                        "format": "kaldi",
-                        "asr_files": asr_files["train_asr"],
                     },
                 ),
             ]
@@ -213,16 +292,24 @@ class MGB(datasets.GeneratorBasedBuilder):
         return re.search("[a-zA-Z0-9\,\.\?\!]", word)
 
     def is_punct(self, word):
-        return self.get_label(word) != Punctuation.NONE
+        return self.get_label(word, all=True) != Punctuation.NONE
 
-    def get_label(self, word):
-        if (word.strip() == "." or word.strip() == "<full_stop>" or word.strip() == "<dots>") and Punctuation.PERIOD in self.include_punct:
+    def get_label(self, word, all=False):
+        if (word.strip() == "<full_stop>" or word.strip() == "<dots>") and (
+            Punctuation.PERIOD in self.include_punct or all
+        ):
             return Punctuation.PERIOD
-        if (word.strip() == "," or word.strip() == "<comma>") and Punctuation.COMMA in self.include_punct:
+        if (word.strip() == "<comma>") and (
+            Punctuation.COMMA in self.include_punct or all
+        ):
             return Punctuation.COMMA
-        if (word.strip() == "?" or word.strip() == "<question_mark>") and Punctuation.QUESTION in self.include_punct:
+        if (word.strip() == "<question_mark>") and (
+            Punctuation.QUESTION in self.include_punct or all
+        ):
             return Punctuation.QUESTION
-        if (word.strip() == "!" or word.strip() == "<exclamation_mark>") and Punctuation.EXCLAMATION in self.include_punct:
+        if (word.strip() == "<exclamation_mark>") and (
+            Punctuation.EXCLAMATION in self.include_punct or all
+        ):
             return Punctuation.EXCLAMATION
         return Punctuation.NONE
 
@@ -243,27 +330,25 @@ class MGB(datasets.GeneratorBasedBuilder):
                         context_words.append(word)
                         context_labels.append(Punctuation.NONE)
                     else:
-                        context_labels[-1] = self.get_label(word)
-        alignment = pairwise2.align.globalxx(
-            context_words, asr_talks[talk]["words"], gap_char=["<gap>"]
-        )[0]
+                        try:
+                            context_labels[-1] = self.get_label(word)
+                        except:
+                            return []
+        seqHash = hash(" ".join(context_words)) + hash(" ".join(asr_talks[talk]["words"]))
+        if seqHash not in self.cache:
+            self.cache[seqHash] = align(context_words, asr_talks[talk]["words"])
+        seqA, seqB = self.cache[seqHash]
         lbl_i = 0
         new_words = []
         new_labels = []
-        for i, word in enumerate(alignment.seqA):
-            if (
-                alignment.seqB[i] == "<pause>"
-                and i > 0
-                and alignment.seqB[i - 1] != "<gap>"
-            ):
+        for i, word in enumerate(seqA):
+            if word == "<gap>" and seqB[i] == "<pause>":
                 new_words.append("<pause>")
                 new_labels.append(Punctuation.NONE)
-                lbl_i -= 1
             if word != "<gap>":
                 new_words.append(word)
-                new_labels.append(context_labels[i + lbl_i])
-            else:
-                lbl_i -= 1
+                new_labels.append(context_labels[lbl_i])
+                lbl_i += 1
         new_context_words = []
         new_context_labels = []
         i = 0
@@ -275,33 +360,73 @@ class MGB(datasets.GeneratorBasedBuilder):
             la = np.random.randint(min_lookahead, max_lookahead + 1)
             if len(new_context_words) >= window:
                 right_context = new_context_words[-max_lookahead:][:la]
+                left_context = new_context_words[la:-(max_lookahead)]
+                left_context_labels = new_context_labels[la:-(max_lookahead)]
                 num_right_pauses = None
                 while num_right_pauses != len(
                     [p for p in right_context if p == "<pause>"]
                 ):
-                    num_right_pauses = len(
-                        [p for p in right_context if p == "<pause>"]
-                    )
+                    num_right_pauses = len([p for p in right_context if p == "<pause>"])
+                    left_context = new_context_words[
+                        la : -(max_lookahead + num_right_pauses)
+                    ]
+                    left_context_labels = new_context_labels[
+                        la : -(max_lookahead + num_right_pauses)
+                    ]
+                    if left_context[-1] == "<pause>":
+                        num_right_pauses += 1
+                    left_context = new_context_words[
+                        la : -(max_lookahead + num_right_pauses)
+                    ]
+                    left_context_labels = new_context_labels[
+                        la : -(max_lookahead + num_right_pauses)
+                    ]
                     right_context = new_context_words[
                         -(max_lookahead + num_right_pauses) :
                     ][: (la + num_right_pauses)]
-
-                results.append((i, {
-                    "text": " ".join(
-                        new_context_words[
-                            la : -(max_lookahead + num_right_pauses)
-                        ]
+                if self.config.teacher_forcing:
+                    left_context_new = []
+                    for j, word in enumerate(left_context[:-1]):
+                        left_context_new.append(word)
+                        if j < len(left_context) - 1 and left_context_labels[j] != Punctuation.NONE:
+                            left_context_new.append(punct_map[left_context_labels[j].value])
+                    left_context = ""
+                    for w in left_context_new:
+                        if w not in punct_map.values():
+                            left_context += " "
+                        left_context += w
+                    left_context = left_context.strip()
+                else:
+                    left_context = " ".join(left_context)
+                if self.config.task == Task.TAGGING:
+                    results.append(
+                        (
+                            i,
+                            {
+                                "tokens": left_context.split(" "),
+                                "label": [l.value for l in left_context_labels],
+                            },
+                        )
                     )
-                    + " <punct> "
-                    + " ".join(right_context),
-                    "label": new_labels[-(max_lookahead + 1)].value,
-                    "lookahead": la,
-                }))
+                if self.config.task == Task._STREAMING_CLASSIFICATION:
+                    results.append(
+                        (
+                            i,
+                            {
+                                "text": left_context
+                                + " <punct> "
+                                + " ".join(right_context),
+                                "label": left_context_labels[-1].value,
+                                "lookahead": la,
+                            },
+                        )
+                    )
             i += 1
         return results
 
     def _generate_examples(self, filepath, format, asr_files=None):
         logging.info("⏳ Generating examples from = %s", filepath)
+        asr_talks = None
         texts = []
         talks = {}
         if not isinstance(filepath, list):
@@ -331,10 +456,10 @@ class MGB(datasets.GeneratorBasedBuilder):
                 with open(path, "r") as f:
                     line = f.readline()
                     while len(line) != 0:
-                        seg_id = line.split()[0]
-                        if seg_id in talks:
-                            raise ValueError(f"seg_id {seg_id} is not unique")
-                        talks[seg_id] = " ".join(line.split()[1:])
+                        seg_id = line.split()[0].split("-")[0]
+                        if seg_id not in talks:
+                            talks[seg_id] = []
+                        talks[seg_id].append(" ".join(line.split()[1:]))
                         line = f.readline()
             if format == "kaldi-plain":
                 with open(path, "r") as f:
@@ -352,25 +477,36 @@ class MGB(datasets.GeneratorBasedBuilder):
             for asr_file in asr_files:
                 with open(asr_file, "r") as f:
                     line = f.readline()
-                    prev_talkid = None
+                    prev_ts = None
+                    segment = None
                     while len(line) != 0:
                         if len(line.split()) == 5:
                             talkid, _, start_time, duration, word = line.split()
                             if format != "kaldi":
                                 talkid = int(talkid[6:])
+                            else:
+                                diff_segment = segment != talkid.split("-")[1]
+                                talkid, segment, ts = talkid.split("-")
+                                if prev_ts != ts:
+                                    if prev_ts is not None:
+                                        start_ts = int(prev_ts.split(':')[1])
+                                    else:
+                                        start_ts = 0
+                                    end_ts = int(ts.split(':')[1])
+                                prev_ts = ts
                             if talkid not in asr_talks:
                                 asr_talks[talkid] = {
                                     "words": [],
-                                    "pauses": [1],
+                                    "pauses": [abs(end_ts - start_ts)/1000],
                                 }
                             else:
                                 asr_talks[talkid]["pauses"].append(
                                     float(start_time) - float(prev_end_time)
                                 )
-                            if asr_talks[talkid]["pauses"][-1] >= 0.2:
+                            if asr_talks[talkid]["pauses"][-1] >= self.pause_threshold:
                                 asr_talks[talkid]["words"].append("<pause>")
                             prev_end_time = float(start_time) + float(duration)
-                            asr_talks[talkid]["words"].append(word)
+                            asr_talks[talkid]["words"].append(word.lower())
                         line = f.readline()
 
         np.random.seed(42)
@@ -395,17 +531,28 @@ class MGB(datasets.GeneratorBasedBuilder):
                     context_labels = context_labels[-(window + max_lookahead) :]
                     la = np.random.randint(min_lookahead, max_lookahead + 1)
                     if len(context_words) >= window:
-                        yield i, {
-                            "text": " ".join(context_words[la:-max_lookahead])
-                            + " <punct> "
-                            + " ".join(context_words[-max_lookahead:][:la]),
-                            "label": context_labels[-(max_lookahead + 1)].value,
-                            "lookahead": la,
-                        }
+                        if self.config.task == Task.TAGGING:
+                            yield i, {
+                                        "tokens": context_words[la:-max_lookahead],
+                                        "label": [
+                                            l.value for l in context_labels[la:-max_lookahead]
+                                        ],
+                                    }
+                        if self.config.task == Task._STREAMING_CLASSIFICATION:
+                            yield i, {
+                                "text": " ".join(context_words[la:-max_lookahead])
+                                + " <punct> "
+                                + " ".join(context_words[-max_lookahead:][:la]),
+                                "label": context_labels[
+                                    -(max_lookahead + 1)
+                                ].value,
+                                "lookahead": la,
+                            }
                     i += 1
 
         if format == "xml" or format == "kaldi" and asr_talks is not None:
-            #overlap_talks = [t for t in talks.keys() if t in asr_talks.keys()]
+            overlap_talks = [t for t in talks.keys() if t in asr_talks.keys()]
+
             def overlap_generator(talks, asr_talks):
                 for t in talks.keys():
                     if t in asr_talks.keys():
@@ -413,8 +560,12 @@ class MGB(datasets.GeneratorBasedBuilder):
 
             self.talks = talks
             self.asr_talks = asr_talks
-            pool = Pool()
-            for result in tqdm(pool.imap_unordered(self.align_talk, overlap_generator(talks, asr_talks), chunksize=128)):
+            pool = Pool(8)
+            for result in tqdm(
+                pool.imap_unordered(self.align_talk, overlap_talks, chunksize=8),
+                total=len(overlap_talks),
+            ):
+            #for result in tqdm([self.align_talk(t) for t in overlap_talks], total=len(overlap_talks)):
                 for item in result:
                     yield item
             pool.close()
